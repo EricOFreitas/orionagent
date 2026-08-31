@@ -16,6 +16,7 @@ import sys
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from bot.handlers import (
+    agenda_command,
     decidir_command,
     fim_command,
     help_command,
@@ -23,9 +24,11 @@ from bot.handlers import (
     planejar_command,
     prazo_command,
     projeto_command,
+    resolver_command,
     revisao_command,
     start,
     status_command,
+    tarefa_command,
 )
 from bot.scheduler import setup_scheduler
 from db.models import initialize_db
@@ -69,6 +72,9 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("projeto", projeto_command))
     app.add_handler(CommandHandler("prazo", prazo_command))
+    app.add_handler(CommandHandler("tarefa", tarefa_command))
+    app.add_handler(CommandHandler("agenda", agenda_command))
+    app.add_handler(CommandHandler("resolver", resolver_command))
 
     # Conversational commands
     app.add_handler(CommandHandler("planejar", planejar_command))

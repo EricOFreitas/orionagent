@@ -20,15 +20,17 @@ Rotina diária:
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 import pytz
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from telegram import Bot
 
 from bot.agent import AgentSession, send_message
 from bot.context_builder import build_context, get_upcoming_deadlines
+from db.models import Task
 from bot.handlers import active_sessions
 from db.models import Interaction
 from prompts.system import (
@@ -192,6 +194,35 @@ async def class_reminder(bot: Bot) -> None:
     await _send(bot, "📚 *Aula em 5 minutos!* Boa aula 🎓")
 
 
+async def task_reminder_check(bot: Bot) -> None:
+    """Cada minuto — Dispara lembretes de tarefas com horário definido."""
+    try:
+        now = datetime.now()
+        today = now.date()
+        current_time = now.strftime("%H:%M")
+
+        due_tasks = list(
+            Task.select().where(
+                Task.due_date == today,
+                Task.due_time == current_time,
+                Task.reminder_sent == False,  # noqa: E712
+                Task.status == "pending",
+            )
+        )
+
+        for task in due_tasks:
+            task.reminder_sent = True
+            task.save()
+            await _send(
+                bot,
+                f"⏰ *Lembrete:* {task.title}\n\n"
+                f"Quer ajuda para resolver isso? Use `/resolver {task.id}`",
+            )
+            logger.info("Task reminder sent: id=%d title=%s", task.id, task.title)
+    except Exception:
+        logger.error("task_reminder_check failed", exc_info=True)
+
+
 async def weekly_review(bot: Bot) -> None:
     """Domingo 18:00 — Revisão semanal conversacional."""
     try:
@@ -289,6 +320,13 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         weekly_review,
         CronTrigger(day_of_week=cron_day, hour=18, minute=0, timezone=tz),
         args=[bot], id="weekly_review", name="Weekly Review", replace_existing=True,
+    )
+
+    # -- Lembretes de tarefas (a cada minuto) --
+    scheduler.add_job(
+        task_reminder_check,
+        IntervalTrigger(minutes=1, timezone=tz),
+        args=[bot], id="task_reminder", name="Task Reminder", replace_existing=True,
     )
 
     return scheduler

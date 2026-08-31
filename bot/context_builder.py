@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
-from db.models import Decision, Interaction, Project, Settings
+from db.models import Decision, Interaction, Project, Settings, Task
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,62 @@ def get_upcoming_deadlines(days: int = 7) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Task helpers
+# ---------------------------------------------------------------------------
+
+
+def get_today_tasks() -> list[dict]:
+    """Return pending tasks scheduled for today, ordered by time."""
+    try:
+        today = date.today()
+        rows = (
+            Task.select()
+            .where(Task.due_date == today, Task.status == "pending")
+            .order_by(Task.due_time.asc())
+        )
+        return [
+            {
+                "id": t.id,
+                "title": t.title,
+                "due_time": t.due_time,
+                "notes": t.notes,
+            }
+            for t in rows
+        ]
+    except Exception:
+        logger.error("Error fetching today tasks", exc_info=True)
+        return []
+
+
+def get_pending_tasks(limit: int = 10) -> list[dict]:
+    """Return upcoming pending tasks (today and future), ordered by date/time."""
+    try:
+        today = date.today()
+        rows = (
+            Task.select()
+            .where(
+                Task.status == "pending",
+                (Task.due_date.is_null(True)) | (Task.due_date >= today),
+            )
+            .order_by(Task.due_date.asc(), Task.due_time.asc())
+            .limit(limit)
+        )
+        return [
+            {
+                "id": t.id,
+                "title": t.title,
+                "due_date": str(t.due_date) if t.due_date else None,
+                "due_time": t.due_time,
+                "notes": t.notes,
+            }
+            for t in rows
+        ]
+    except Exception:
+        logger.error("Error fetching pending tasks", exc_info=True)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Decision helpers
 # ---------------------------------------------------------------------------
 
@@ -134,6 +190,7 @@ def build_context() -> dict:
     return {
         "active_projects": get_active_projects(),
         "upcoming_deadlines": get_upcoming_deadlines(),
+        "today_tasks": get_today_tasks(),
         "recent_decisions": get_recent_decisions(),
         "last_interactions": get_last_interactions(),
     }

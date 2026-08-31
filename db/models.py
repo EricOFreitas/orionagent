@@ -3,6 +3,7 @@ from datetime import datetime
 
 from peewee import (
     AutoField,
+    BooleanField,
     CharField,
     DateField,
     DateTimeField,
@@ -83,6 +84,22 @@ class Interaction(BaseModel):
         table_name = "interactions"
 
 
+class Task(BaseModel):
+    """A task or appointment with an optional date and time for reminders."""
+
+    id = AutoField()
+    title = CharField(max_length=300)
+    due_date = DateField(null=True)
+    due_time = CharField(max_length=5, null=True)   # "HH:MM"
+    reminder_sent = BooleanField(default=False)
+    status = CharField(max_length=50, default="pending")  # pending | done | cancelled
+    notes = TextField(null=True)
+    created_at = DateTimeField(default=datetime.now)
+
+    class Meta:
+        table_name = "tasks"
+
+
 class Settings(BaseModel):
     """Key–value store for runtime configuration."""
 
@@ -97,6 +114,6 @@ def initialize_db() -> None:
     """Connect to the database and create all tables if they do not exist."""
     database.connect(reuse_if_open=True)
     database.create_tables(
-        [Project, DailyPlan, Decision, Interaction, Settings],
+        [Project, DailyPlan, Decision, Interaction, Task, Settings],
         safe=True,
     )

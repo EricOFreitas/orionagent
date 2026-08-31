@@ -60,6 +60,14 @@ def build_system_prompt(context: dict | None = None) -> str:
             section.append(f"- {p['name']}: {p['deadline']} ({urgency})")
         parts.append("\n".join(section))
 
+    if context.get("today_tasks"):
+        section = ["## Tarefas de Hoje"]
+        for t in context["today_tasks"]:
+            time_str = f" às {t['due_time']}" if t.get("due_time") else ""
+            notes_str = f" — {t['notes']}" if t.get("notes") else ""
+            section.append(f"- [{t['id']}]{time_str} {t['title']}{notes_str}")
+        parts.append("\n".join(section))
+
     if context.get("recent_decisions"):
         section = ["## Decisões Recentes"]
         for d in context["recent_decisions"]:
@@ -146,6 +154,20 @@ Guie uma retrospectiva estruturada da semana:
 
 Use as informações de projetos e interações disponíveis no contexto para tornar \
 a análise concreta. Encerre com **3 prioridades claras para a próxima semana**.\
+"""
+
+TASK_RESOLVE_PROMPT = """\
+## Modo: Resolução de Tarefa
+
+O usuário quer ajuda para lidar com uma tarefa específica. Seja prático e direto.
+
+Processo:
+1. Entenda o que precisa ser feito (já tem o título — aprofunde se necessário).
+2. Se a tarefa for complexa, quebre em passos concretos e ordenados.
+3. Se houver um obstáculo ou dúvida, ajude a removê-lo.
+4. Confirme o próximo passo imediato que o usuário deve dar.
+
+Foco em ação. Não filosofe — resolva.\
 """
 
 SUMMARY_PROMPT = """\

@@ -28,12 +28,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from bot.agent import AgentSession, send_message, summarize_conversation
-from bot.context_builder import build_context, get_upcoming_deadlines
-from db.models import DailyPlan, Decision, Interaction, Project
+from bot.context_builder import build_context, get_pending_tasks, get_today_tasks, get_upcoming_deadlines
+from db.models import DailyPlan, Decision, Interaction, Project, Task
 from prompts.system import (
     DECISION_PROMPT,
     NIGHTLY_PLANNING_PROMPT,
     PLANNING_PROMPT,
+    TASK_RESOLVE_PROMPT,
     WEEKLY_REVIEW_PROMPT,
     build_system_prompt,
 )
@@ -54,6 +55,7 @@ _SESSION_EXTRA: dict[str, str] = {
     "planning": PLANNING_PROMPT,
     "decision": DECISION_PROMPT,
     "weekly_review": WEEKLY_REVIEW_PROMPT,
+    "task_resolve": TASK_RESOLVE_PROMPT,
 }
 
 
@@ -76,6 +78,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(
         "*Orion — Agente de Produtividade* 🌟\n\n"
+        "*Tarefas e lembretes*\n"
+        "• /tarefa add \\<título\\> \\[YYYY\\-MM\\-DD\\] \\[HH:MM\\] — Nova tarefa\n"
+        "• /tarefa list — Tarefas pendentes\n"
+        "• /tarefa done \\<id\\> — Marcar como concluída\n"
+        "• /agenda — Tarefas de hoje\n"
+        "• /resolver \\<id\\> — Ajuda para resolver uma tarefa\n\n"
         "*Conversas guiadas*\n"
         "• /planejar — Planejar o dia\n"
         "• /decidir \\[contexto\\] — Apoio a decisões complexas\n"
@@ -87,7 +95,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "• /prazo \\<id\\> \\<YYYY\\-MM\\-DD\\> — Atualizar prazo\n\n"
         "*Visão geral*\n"
         "• /status — Prazos próximos\n\n"
-        "• /help — Ajuda detalhada e fluxo do bot",
+        "• /help — Ajuda detalhada",
         parse_mode="MarkdownV2",
     )
 
@@ -98,6 +106,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 _HELP_TEXT = """
 📖 *Guia do Orion*
+
+━━━━━━━━━━━━━━━━━
+✅ *TAREFAS E LEMBRETES*
+━━━━━━━━━━━━━━━━━
+*/tarefa add <título> [YYYY-MM-DD] [HH:MM]*
+Cadastra uma tarefa. Data e hora são opcionais.
+  • /tarefa add Enviar relatório 2026-05-20 09:00
+  • /tarefa add Ligar para João 2026-05-18
+  • /tarefa add Comprar material
+
+Quando a hora chegар, Orion te avisa automaticamente.
+
+*/tarefa list*
+Lista todas as tarefas pendentes.
+
+*/tarefa done <id>*
+Marca uma tarefa como concluída.
+
+*/agenda*
+Mostra as tarefas do dia de hoje com horários.
+
+*/resolver <id>*
+Abre uma sessão para ajudar a lidar com a tarefa:
+quebra em passos, remove obstáculos, define próximo passo.
+
+━━━━━━━━━━━━━━━━━
 
 ━━━━━━━━━━━━━━━━━
 🗓 *PLANEJAMENTO*
@@ -331,6 +365,202 @@ async def prazo_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     except Exception:
         logger.error("Error updating deadline", exc_info=True)
         await update.message.reply_text("Erro ao atualizar prazo.")
+
+
+# ---------------------------------------------------------------------------
+# /tarefa
+# ---------------------------------------------------------------------------
+
+
+async def tarefa_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update.effective_user.id):
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso:\n"
+            "• `/tarefa add <título> [YYYY-MM-DD] [HH:MM]`\n"
+            "• `/tarefa list`\n"
+            "• `/tarefa done <id>`",
+            parse_mode="Markdown",
+        )
+        return
+
+    sub = args[0].lower()
+    if sub == "list":
+        await _tarefa_list(update)
+    elif sub == "add":
+        await _tarefa_add(update, args[1:])
+    elif sub == "done":
+        await _tarefa_done(update, args[1:])
+    else:
+        await update.message.reply_text(
+            "Subcomandos: `add`, `list`, `done`", parse_mode="Markdown"
+        )
+
+
+async def _tarefa_list(update: Update) -> None:
+    tasks = get_pending_tasks()
+    if not tasks:
+        await update.message.reply_text(
+            "Nenhuma tarefa pendente. Use `/tarefa add` para criar uma.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["*Tarefas Pendentes:*\n"]
+    for t in tasks:
+        date_str = ""
+        if t.get("due_date"):
+            date_str = f" 📅 {t['due_date']}"
+            if t.get("due_time"):
+                date_str += f" {t['due_time']}"
+        lines.append(f"• `[{t['id']}]` {t['title']}{date_str}")
+        if t.get("notes"):
+            lines.append(f"  _{t['notes']}_")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def _tarefa_add(update: Update, args: list[str]) -> None:
+    if not args:
+        await update.message.reply_text("Informe o título da tarefa.")
+        return
+
+    due_date: date | None = None
+    due_time: str | None = None
+    title_parts: list[str] = []
+
+    for arg in args:
+        if len(arg) == 10 and arg.count("-") == 2:
+            try:
+                due_date = datetime.strptime(arg, "%Y-%m-%d").date()
+                continue
+            except ValueError:
+                pass
+        if len(arg) == 5 and arg.count(":") == 1:
+            try:
+                h, m = arg.split(":")
+                if 0 <= int(h) <= 23 and 0 <= int(m) <= 59:
+                    due_time = arg
+                    continue
+            except ValueError:
+                pass
+        title_parts.append(arg)
+
+    title = " ".join(title_parts).strip()
+    if not title:
+        await update.message.reply_text("Informe o título da tarefa.")
+        return
+
+    try:
+        task = Task.create(title=title, due_date=due_date, due_time=due_time)
+        parts = [f"✅ Tarefa criada (ID: `{task.id}`)\n*{title}*"]
+        if due_date:
+            parts.append(f"📅 {due_date}" + (f" às {due_time}" if due_time else ""))
+        else:
+            parts.append("Sem data definida")
+        await update.message.reply_text("\n".join(parts), parse_mode="Markdown")
+    except Exception:
+        logger.error("Error creating task", exc_info=True)
+        await update.message.reply_text("Erro ao criar tarefa.")
+
+
+async def _tarefa_done(update: Update, args: list[str]) -> None:
+    if not args:
+        await update.message.reply_text("Informe o ID da tarefa: `/tarefa done <id>`", parse_mode="Markdown")
+        return
+    try:
+        task_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("O ID deve ser um número.")
+        return
+
+    try:
+        task = Task.get_by_id(task_id)
+        task.status = "done"
+        task.save()
+        await update.message.reply_text(f"✅ *{task.title}* concluída!", parse_mode="Markdown")
+    except Task.DoesNotExist:
+        await update.message.reply_text("Tarefa não encontrada.")
+    except Exception:
+        logger.error("Error completing task", exc_info=True)
+        await update.message.reply_text("Erro ao atualizar tarefa.")
+
+
+# ---------------------------------------------------------------------------
+# /agenda
+# ---------------------------------------------------------------------------
+
+
+async def agenda_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update.effective_user.id):
+        return
+
+    tasks = get_today_tasks()
+    if not tasks:
+        await update.message.reply_text("Nenhuma tarefa para hoje. ✅")
+        return
+
+    lines = [f"*Agenda de hoje ({date.today().strftime('%d/%m')}):*\n"]
+    for t in tasks:
+        time_str = f"`{t['due_time']}`  " if t.get("due_time") else "  "
+        lines.append(f"• {time_str}[{t['id']}] {t['title']}")
+        if t.get("notes"):
+            lines.append(f"  _{t['notes']}_")
+
+    lines.append("\nUse `/resolver <id>` para ajuda com qualquer tarefa.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ---------------------------------------------------------------------------
+# /resolver
+# ---------------------------------------------------------------------------
+
+
+async def resolver_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _authorized(update.effective_user.id):
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Uso: `/resolver <id>` — informe o ID da tarefa.", parse_mode="Markdown"
+        )
+        return
+
+    try:
+        task_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("O ID deve ser um número.")
+        return
+
+    try:
+        task = Task.get_by_id(task_id)
+    except Task.DoesNotExist:
+        await update.message.reply_text("Tarefa não encontrada.")
+        return
+
+    if task.status != "pending":
+        await update.message.reply_text(
+            f"A tarefa *{task.title}* já está com status `{task.status}`.",
+            parse_mode="Markdown",
+        )
+        return
+
+    date_str = ""
+    if task.due_date:
+        date_str = f" (prazo: {task.due_date}"
+        if task.due_time:
+            date_str += f" às {task.due_time}"
+        date_str += ")"
+
+    initial_msg = f"Preciso de ajuda para resolver: {task.title}{date_str}."
+    if task.notes:
+        initial_msg += f" Observações: {task.notes}"
+
+    await _start_session(update, "task_resolve", initial_msg)
 
 
 # ---------------------------------------------------------------------------
